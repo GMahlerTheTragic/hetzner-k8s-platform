@@ -1,0 +1,26 @@
+---
+- name: Update package cache and install updates on Debian/Ubuntu
+  apt:
+    update_cache: yes
+  when: ansible_pkg_mgr == 'apt'
+  tags: update
+
+- name: Update package cache and install updates on RedHat/CentOS/Amazon Linux
+  yum:
+    name: "*"
+    state: latest
+  when: ansible_pkg_mgr == 'yum'
+  tags: update
+
+- name: Update package cache and install updates on Fedora
+  dnf:
+    name: "*"
+    state: latest
+  when: ansible_pkg_mgr == 'dnf'
+  tags: update
+
+- name: Fail if OS is unsupported
+  fail:
+    msg: "Unsupported package manager for OS: {{ ansible_os_family }}."
+  when: ansible_pkg_mgr not in ['apt', 'yum', 'dnf']
+  tags: update

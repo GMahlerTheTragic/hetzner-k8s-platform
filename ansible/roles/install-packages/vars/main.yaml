@@ -1,0 +1,4 @@
+---
+# Default list of packages to install (can be overridden in playbook)
+packages_to_install:
+

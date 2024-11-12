@@ -1,0 +1,130 @@
+---
+- name: Set up Kubernetes cluster with kubeadm
+  hosts: all
+  become: true
+  tasks:
+    - name: Update apt and install dependencies
+      import_role:
+        name: update-package-manager
+
+    - name: Install required packages
+      import_role:
+        name: install-packages
+      vars:
+        packages_to_install:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - docker.io
+
+    - name: Add Kubernetes APT GPG key
+      when: ansible_os_family == "Debian"
+      apt_key:
+        url: https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key
+        state: present
+
+    - name: GPG
+      shell: |
+        mkdir -p /etc/apt/keyrings/
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | sudo gpg --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-archive-keyring.gpg
+
+    - name: Add Kubernetes APT repository
+      when: ansible_os_family == "Debian"
+      apt_repository:
+        repo: deb https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /
+        state: present
+        filename: 'kubernetes'
+
+    - name: Install kubelet, kubeadm, and kubectl
+      import_role:
+        name: install-packages
+      vars:
+        packages_to_install:
+          - kubelet
+          - kubeadm
+          - kubectl
+
+    - name: Disable swap
+      command: swapoff -a
+      when: ansible_swaptotal_mb > 0
+
+    - name: Ensure swap is disabled in /etc/fstab
+      mount:
+        name: swap
+        fstab: /etc/fstab
+        state: absent
+
+    - name: Enable and start kubelet
+      systemd:
+        name: kubelet
+        enabled: yes
+        state: started
+
+- name: Initialize Kubernetes control plane
+  hosts: control
+  become: true
+  tasks:
+    - name: Install HCC
+      shell: |
+        mkdir -p /etc/systemd/system/kubelet.service.d/ &&
+        cat << EOF > /etc/systemd/system/kubelet.service.d/20-hcloud.conf
+        [Service]
+        Environment="KUBELET_EXTRA_ARGS=--cloud-provider=external"
+
+    - name: Initialize Kubernetes master node
+      shell: kubeadm reset -f && kubeadm init --pod-network-cidr=10.244.0.0/16
+      register: master_init
+
+    - name: Set up kubeconfig for kubectl
+      shell: |
+        sudo mkdir -p $HOME/.kube &&
+        sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config && 
+        sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+    - name: Save the kubeadm join command for worker nodes
+      shell: kubeadm token create --print-join-command
+      register: join_command
+
+- name: Join worker nodes to the cluster
+  hosts: workers
+  become: true
+  tasks:
+    - name: Reset to cleanup
+      shell:
+        kubeadm reset -f
+    - name: Join Kubernetes worker node
+      command: "{{ hostvars[groups['control'].0]['join_command'].stdout }}"
+
+- name: Continue Kubernetes configuration
+  hosts: control
+  become: true
+  tasks:
+    - name: Install helm
+      shell: |
+        curl https://baltocdn.com/helm/signing.asc | gpg --dearmor | sudo tee /usr/share/keyrings/helm.gpg > /dev/null &&
+        sudo apt-get install apt-transport-https --yes &&
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/helm.gpg] https://baltocdn.com/helm/stable/debian/ all main" | sudo tee /etc/apt/sources.list.d/helm-stable-debian.list &&
+        sudo apt-get update &&
+        sudo apt-get install helm
+
+    - name: Install Flannel CNI
+      shell: |
+        kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml &&
+        kubectl -n kube-flannel patch ds kube-flannel-ds --type json -p '[{"op":"add","path":"/spec/template/spec/tolerations/-","value":{"key":"node.cloudprovider.kubernetes.io/uninitialized","value":"true","effect":"NoSchedule"}}]'
+
+    - name: Create a secret containing your Hetzner Cloud API token.
+      shell:
+        kubectl -n kube-system create secret generic hcloud --from-literal=token=$SECRET_KEY --from-literal=network=$CLUSTER_NETWORK_ID
+      environment:
+        SECRET_KEY: "{{ lookup('env', 'TF_VAR_hcloud_token') }}"
+        CLUSTER_NETWORK_ID: "{{ lookup('env', 'CLUSTER_NETWORK_ID') }}"
+
+    - name: Deploy hcloud-cloud-controller-manager
+      shell: |
+        kubectl -n kube-system apply -f https://github.com/hetznercloud/hcloud-cloud-controller-manager/releases/latest/download/ccm-networks.yaml
+
+    - name: Deploy ArgoCd
+      shell: |
+        kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml

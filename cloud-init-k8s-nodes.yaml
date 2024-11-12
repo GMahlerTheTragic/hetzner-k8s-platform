@@ -1,0 +1,31 @@
+#cloud-config
+users:
+  - name: ansible
+    gecos: "Ansible User"
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    groups: sudo
+    ssh-authorized-keys:
+      - ${ssh_public_key}
+    shell: /bin/bash
+
+disable_root: true
+
+ssh_pwauth: false
+
+package_update: true
+package_upgrade: true
+
+resolv_conf:
+  nameservers: ['185.12.64.2', '185.12.64.1']
+
+runcmd:
+  - |
+    cat <<'EOF' >> /etc/networkd-dispatcher/routable.d/50-masq
+    #!/bin/sh
+    /sbin/ip route add default via 10.0.0.1
+    EOF
+  - chmod +x /etc/networkd-dispatcher/routable.d/50-masq
+  - sed -i '/^\s*#DNS=/s/^#DNS=/DNS=185.12.64.2 185.12.64.1/' /etc/systemd/resolved.conf
+  - systemctl restart systemd-resolved
+  - systemctl restart systemd-networkd
+
